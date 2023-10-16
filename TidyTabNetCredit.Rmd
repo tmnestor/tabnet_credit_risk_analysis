@@ -1,0 +1,206 @@
+---
+title: "TabNet Credit Risk Modelling"
+---
+
+```{r setup, include=FALSE}
+# if (!require("pacman")) install.packages("packman")
+# pacman::p_load(tidyverse, lubridate)
+base_dir <- "./"
+knitr::opts_chunk$set(echo = TRUE,
+                      	message = FALSE,
+	                      warning = FALSE,
+                        root.dir = 'base_dir')
+
+# dir.create(figs_dir, recursive = TRUE)
+setwd(base_dir)
+```
+
+```{r}
+# Package names
+packages <- c("tidyverse",  "torch", "tabnet",
+              "tidymodels", "finetune", "vip")
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+# Packages loading
+sapply(packages, require, character = TRUE)|> 
+  suppressPackageStartupMessages()
+
+set.seed(777)
+torch_manual_seed(777)
+options(yardstick.event_first = FALSE)
+
+```
+
+## data Loading
+
+```{r}
+set.seed(13383645)
+#Reading Data
+german_credit <-  read.table("http://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data")
+
+#Assigning variable names
+colnames(german_credit)=c("chk_acct","duration","credit_his","purpose","amount","saving_acct","present_emp","installment_rate","sex","other_debtor","present_resid","property","age","other_install","housing","n_credits","job","n_people","telephone","foreign","Class")
+
+
+german_credit <- german_credit |> 
+  mutate_at(vars("chk_acct","credit_his","purpose","saving_acct","present_emp","sex","other_debtor","present_resid","property","other_install","housing","job","telephone","foreign"), factor) |> 
+  dplyr::mutate(Class = case_when(Class == 2 ~0, Class == 1 ~ 1),
+                Class = as.factor(Class))
+
+levels(german_credit$Class)
+
+```
+
+```{r}
+test_frac <- 0.2
+
+split <- initial_time_split(german_credit, prop = 1 - test_frac)
+train <- training(split)
+test  <- testing(split)
+rec <- recipe(Class ~ ., train) 
+```
+
+```{r}
+# hyperparameter settings (apart from epochs) as per the TabNet paper (TabNet-S)
+mod <- tabnet(epochs = 200, batch_size = 512, decision_width = 39, attention_width = 38,
+              num_steps = 4, penalty = 0.000001, virtual_batch_size = 512, momentum = 0.6,
+              feature_reusage = 1.5, learn_rate = 0.02) %>%
+  set_engine("torch", verbose = TRUE) %>%
+  set_mode("classification")
+
+
+wf <- workflow() %>%
+  add_model(mod) %>%
+  add_recipe(rec)
+
+fitted_model <- wf %>% fit(train)
+
+# access the underlying parsnip model and save it to RDS format
+# depending on when you read this, a nice wrapper may exist
+# see https://github.com/mlverse/tabnet/issues/27  
+fitted_model$fit$fit$fit %>% saveRDS("saved_model.rds")
+
+preds <- test %>% 
+  bind_cols(predict(fitted_model, test))
+
+# yardstick::accuracy(preds, Class, .pred_class)
+# yardstick::precision(preds, Class, .pred_class)
+# yardstick::recall(preds, Class, .pred_class)
+```
+
+## CV GridSearch Hypertuning
+
+```{r}
+mod <- tabnet(epochs = 1, batch_size = 64, decision_width = tune(), attention_width = tune(),
+              num_steps = tune(), penalty = 0.000001, virtual_batch_size = 64, momentum = 0.6,
+              feature_reusage = 1.5, learn_rate = tune()) %>%
+  set_engine("torch", verbose = TRUE) %>%
+  set_mode("classification")
+
+wf <- workflow() %>%
+  add_model(mod) %>%
+  add_recipe(rec)
+
+grid <-
+  wf %>%
+  parameters() %>%
+  update(
+    decision_width = decision_width(range = c(20, 40)),
+    attention_width = attention_width(range = c(20, 40)),
+    num_steps = num_steps(range = c(4, 6)),
+    learn_rate = learn_rate(range = c(-2.5, -1))
+  ) %>%
+  grid_max_entropy(size = 8)
+
+grid
+
+
+
+# ctrl <- control_race(verbose_elim = TRUE)
+ctrl <- control_race(verbose = TRUE, save_pred = TRUE)
+
+folds <- vfold_cv(train, v = 5)
+set.seed(777)
+
+res <- wf %>% 
+    tune_race_anova(
+    resamples = folds, 
+    grid = grid,
+    control = ctrl
+  )
+
+fit <- pull_workflow_fit(fitted_model)
+vip(fit) + theme_minimal()
+```
+
+```{r}
+
+best_param <- res |> 
+   select_best(metric = "roc_auc") |> 
+   select(-.config)
+
+best_param$learn_rate
+best_param$decision_width
+best_param$attention_width
+best_param$num_steps
+```
+
+```{r}
+# https://cran.r-project.org/web/packages/tabnet/vignettes/tidymodels-interface.html
+set.seed(13383645)
+#Reading Data
+german_credit <-  read.table("http://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data")
+
+#Assigning variable names
+colnames(german_credit)=c("chk_acct","duration","credit_his","purpose","amount","saving_acct","present_emp","installment_rate","sex","other_debtor","present_resid","property","age","other_install","housing","n_credits","job","n_people","telephone","foreign","Class")
+
+#Class is in 1,2 - we need to change it to 1->1, 2->0 for Tabnet
+# german_credit$Class <- 2 - german_credit$Class
+# german_credit$Class <- german_credit$Class - 1
+
+german_credit <- german_credit |> 
+  mutate_at(vars("chk_acct","credit_his","purpose","saving_acct","present_emp","sex","other_debtor","present_resid","property","other_install","housing","job","telephone","foreign","Class"), factor)
+#> For binary classification, the first factor level is assumed to be the event.
+#> Use the argument `event_level = "second"` to alter this as needed.
+
+german_credit$Class <- dplyr::recode_factor(german_credit$Class, `1` = "good", `2` = "bad")
+  
+  
+test_idx <- sample.int(nrow(german_credit), size = 0.2 * nrow(german_credit))
+
+train <- german_credit[-test_idx,]
+test <- german_credit[test_idx,]
+
+rec <- recipe(Class ~ ., train) %>%
+  step_normalize(all_numeric())
+
+mod <- tabnet(epochs = 50, batch_size = 128) %>%
+  set_engine("torch", verbose = TRUE) %>%
+  set_mode("classification")
+
+wf <- workflow() %>%
+  add_model(mod) %>%
+  add_recipe(rec)
+
+folds <- vfold_cv(train, v = 5)
+
+fit_rs <- wf %>%
+  fit_resamples(folds)
+
+collect_metrics(fit_rs)
+
+# verify the results on test set
+model <- wf %>% fit(train)
+test %>% 
+  bind_cols(
+    predict(model, test, type = "prob")
+  ) %>% 
+  roc_auc(Class, .pred_bad)
+# https://github.com/mlverse/tabnet
+metrics <- metric_set(accuracy, precision, recall)
+cbind(test, predict(model, test)) |> 
+  metrics(Class, estimate = .pred_class)
+```
