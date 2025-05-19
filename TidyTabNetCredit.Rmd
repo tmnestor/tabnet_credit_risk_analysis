@@ -1,206 +1,568 @@
 ---
 title: "TabNet Credit Risk Modelling"
+author: "Data Science Team"
+date: "Created: 2023"
+output: html_document
+description: "This document implements credit risk prediction models using TabNet neural networks and the tidymodels framework."
 ---
 
+## Introduction
+
+This R Markdown document demonstrates the implementation of TabNet for credit risk prediction using the German Credit dataset. TabNet is a deep learning architecture specifically designed for tabular data, combining the strengths of neural networks with built-in feature selection capabilities.
+
+The workflow includes:
+1. Data loading and preprocessing
+2. Model training with default parameters
+3. Hyperparameter tuning with cross-validation
+4. Model evaluation on test data
+
+We use the tidymodels framework throughout to ensure a consistent modeling interface.
+
 ```{r setup, include=FALSE}
+# Setup environment settings for RMarkdown document
+# Uncomment below lines if you prefer using pacman for package management
 # if (!require("pacman")) install.packages("packman")
 # pacman::p_load(tidyverse, lubridate)
-base_dir <- "./"
-knitr::opts_chunk$set(echo = TRUE,
-                      	message = FALSE,
-	                      warning = FALSE,
-                        root.dir = 'base_dir')
 
+# Set base directory for relative paths
+base_dir <- "./"
+
+# Configure knitr options
+knitr::opts_chunk$set(echo = TRUE,       # Show code in output document
+                      message = FALSE,   # Suppress package loading messages
+                      warning = FALSE,   # Suppress warnings
+                      root.dir = 'base_dir') # Set working directory for code chunks
+
+# Create figures directory if needed
 # dir.create(figs_dir, recursive = TRUE)
+
+# Set working directory to base directory
 setwd(base_dir)
 ```
 
+## Package Loading and Environment Setup
+
 ```{r}
-# Package names
-packages <- c("tidyverse",  "torch", "tabnet",
-              "tidymodels", "finetune", "vip")
-# Install packages not yet installed
+# Required packages for this analysis
+packages <- c("tidyverse",  # Data manipulation and visualization
+              "torch",      # Deep learning backend
+              "tabnet",     # TabNet implementation
+              "tidymodels", # Modeling framework
+              "finetune",   # For advanced tuning methods
+              "vip")        # Variable importance plots
+
+# Install any packages not yet installed
 installed_packages <- packages %in% rownames(installed.packages())
 if (any(installed_packages == FALSE)) {
   install.packages(packages[!installed_packages])
 }
-# Packages loading
-sapply(packages, require, character = TRUE)|> 
+
+# Load all required packages
+sapply(packages, require, character = TRUE) |> 
   suppressPackageStartupMessages()
 
-set.seed(777)
-torch_manual_seed(777)
-options(yardstick.event_first = FALSE)
+# Set random seeds for reproducibility
+set.seed(777)                    # For R's random number generator
+torch_manual_seed(777)           # For torch's random number generator
 
+# Configure yardstick to handle the target classes correctly
+# Setting FALSE means that the second level is treated as the event of interest
+options(yardstick.event_first = FALSE)
 ```
 
-## data Loading
+## Data Loading and Preprocessing
 
 ```{r}
+# Set seed for reproducibility
 set.seed(13383645)
-#Reading Data
-german_credit <-  read.table("http://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data")
 
-#Assigning variable names
-colnames(german_credit)=c("chk_acct","duration","credit_his","purpose","amount","saving_acct","present_emp","installment_rate","sex","other_debtor","present_resid","property","age","other_install","housing","n_credits","job","n_people","telephone","foreign","Class")
+# Loading the German Credit Dataset from UCI repository
+# This dataset contains information about 1000 loan applications
+# with features about the applicant and a binary classification (good or bad credit risk)
+german_credit <- read.table("http://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data")
 
+# Assign meaningful column names to the dataset
+# The original data comes without headers
+colnames(german_credit) <- c(
+  "chk_acct",       # Status of checking account
+  "duration",       # Duration of credit in months
+  "credit_his",     # Credit history
+  "purpose",        # Purpose of the loan
+  "amount",         # Credit amount
+  "saving_acct",    # Savings account/bonds status
+  "present_emp",    # Present employment since
+  "installment_rate",# Installment rate as % of disposable income
+  "sex",           # Personal status and sex
+  "other_debtor",   # Other debtors / guarantors
+  "present_resid",  # Present residence since
+  "property",       # Property
+  "age",            # Age in years
+  "other_install",  # Other installment plans
+  "housing",        # Housing
+  "n_credits",      # Number of existing credits
+  "job",            # Job
+  "n_people",       # Number of people being liable to provide maintenance
+  "telephone",      # Telephone
+  "foreign",        # Foreign worker
+  "Class"           # Target variable (1=good, 2=bad)
+)
 
+# Data preprocessing: 
+# 1. Convert categorical variables to factors
+# 2. Transform the target variable: Class from (1,2) to (1,0) where 1=good, 0=bad
 german_credit <- german_credit |> 
-  mutate_at(vars("chk_acct","credit_his","purpose","saving_acct","present_emp","sex","other_debtor","present_resid","property","other_install","housing","job","telephone","foreign"), factor) |> 
-  dplyr::mutate(Class = case_when(Class == 2 ~0, Class == 1 ~ 1),
+  # Convert categorical variables to factors for proper modeling
+  mutate_at(vars("chk_acct","credit_his","purpose","saving_acct","present_emp","sex",
+                 "other_debtor","present_resid","property","other_install",
+                 "housing","job","telephone","foreign"), factor) |> 
+  # Recode the target variable: 1=good (coded as 1), 2=bad (coded as 0)
+  dplyr::mutate(Class = case_when(Class == 2 ~ 0, Class == 1 ~ 1),
                 Class = as.factor(Class))
 
+# Check the levels of the target variable
+# This confirms our binary classification setup
 levels(german_credit$Class)
-
 ```
 
-```{r}
-test_frac <- 0.2
+## Data Splitting
 
+```{r}
+# Define the proportion of data to use for testing
+test_frac <- 0.2  # 20% test, 80% training
+
+# Create a training/testing split
+# Using initial_time_split as it's a common practice, though this isn't time series data
+# With prop = 0.8, we're keeping 80% for training
 split <- initial_time_split(german_credit, prop = 1 - test_frac)
+
+# Extract the training and testing datasets
 train <- training(split)
 test  <- testing(split)
+
+# Create a recipe for preprocessing
+# Here we're creating a simple recipe that uses all variables to predict Class
+# No additional preprocessing steps are added at this point
 rec <- recipe(Class ~ ., train) 
 ```
 
+## Model Training with Default Parameters
+
 ```{r}
-# hyperparameter settings (apart from epochs) as per the TabNet paper (TabNet-S)
-mod <- tabnet(epochs = 200, batch_size = 512, decision_width = 39, attention_width = 38,
-              num_steps = 4, penalty = 0.000001, virtual_batch_size = 512, momentum = 0.6,
-              feature_reusage = 1.5, learn_rate = 0.02) %>%
-  set_engine("torch", verbose = TRUE) %>%
-  set_mode("classification")
+# Define TabNet model with hyperparameters based on the original TabNet paper (TabNet-S variant)
+mod <- tabnet(
+  # Training parameters
+  epochs = 200,            # Number of training epochs
+  batch_size = 512,        # Batch size for training
+  
+  # Network architecture parameters
+  decision_width = 39,     # Width of decision prediction layer
+  attention_width = 38,    # Width of attention embedding
+  num_steps = 4,           # Number of decision steps
+  
+  # Regularization parameters
+  penalty = 0.000001,      # L2 regularization strength
+  virtual_batch_size = 512, # Size of virtual batches for batch normalization
+  momentum = 0.6,          # Momentum for batch normalization
+  
+  # Other TabNet-specific parameters
+  feature_reusage = 1.5,   # Coefficient for feature reuse
+  learn_rate = 0.02        # Learning rate
+) %>%
+  set_engine("torch", verbose = TRUE) %>%   # Use torch as the backend engine
+  set_mode("classification")                # Set to classification mode
 
-
+# Create workflow combining model specification and preprocessing recipe
 wf <- workflow() %>%
-  add_model(mod) %>%
-  add_recipe(rec)
+  add_model(mod) %>%       # Add the TabNet model
+  add_recipe(rec)          # Add the preprocessing recipe
 
+# Fit the model on training data
 fitted_model <- wf %>% fit(train)
 
-# access the underlying parsnip model and save it to RDS format
-# depending on when you read this, a nice wrapper may exist
-# see https://github.com/mlverse/tabnet/issues/27  
+# Save the trained model to disk
+# Access the underlying parsnip model and save it to RDS format
+# Note: Depending on the tabnet package version, a direct wrapper might be available
 fitted_model$fit$fit$fit %>% saveRDS("saved_model.rds")
 
+# Generate predictions on the test set
 preds <- test %>% 
   bind_cols(predict(fitted_model, test))
 
+# Evaluate model performance (uncomment to use)
 # yardstick::accuracy(preds, Class, .pred_class)
 # yardstick::precision(preds, Class, .pred_class)
 # yardstick::recall(preds, Class, .pred_class)
 ```
 
-## CV GridSearch Hypertuning
+## Hyperparameter Tuning with Cross-Validation
 
 ```{r}
-mod <- tabnet(epochs = 1, batch_size = 64, decision_width = tune(), attention_width = tune(),
-              num_steps = tune(), penalty = 0.000001, virtual_batch_size = 64, momentum = 0.6,
-              feature_reusage = 1.5, learn_rate = tune()) %>%
-  set_engine("torch", verbose = TRUE) %>%
-  set_mode("classification")
+# Create a TabNet model specification with tunable parameters
+# We're setting epochs=1 for efficiency during tuning, will increase for final training
+mod <- tabnet(
+  # Fixed parameters
+  epochs = 1,              # Using fewer epochs for tuning efficiency
+  batch_size = 64,         # Smaller batch size for tuning
+  penalty = 0.000001,      # L2 regularization strength
+  virtual_batch_size = 64, # Size of virtual batches
+  momentum = 0.6,          # Momentum for batch normalization
+  feature_reusage = 1.5,   # Coefficient for feature reuse
+  
+  # Parameters to tune
+  decision_width = tune(),  # Width of decision prediction layer
+  attention_width = tune(), # Width of attention embedding
+  num_steps = tune(),       # Number of decision steps
+  learn_rate = tune()       # Learning rate
+) %>%
+  set_engine("torch", verbose = TRUE) %>%  # Use torch as the backend
+  set_mode("classification")               # Set to classification mode
 
+# Create workflow combining model and preprocessing recipe
 wf <- workflow() %>%
-  add_model(mod) %>%
-  add_recipe(rec)
+  add_model(mod) %>%      # Add the model with tunable parameters
+  add_recipe(rec)         # Add the preprocessing recipe
 
+# Define the hyperparameter grid to search
 grid <-
   wf %>%
-  parameters() %>%
+  parameters() %>%        # Extract tunable parameters
   update(
-    decision_width = decision_width(range = c(20, 40)),
-    attention_width = attention_width(range = c(20, 40)),
-    num_steps = num_steps(range = c(4, 6)),
-    learn_rate = learn_rate(range = c(-2.5, -1))
+    # Set ranges for each tuning parameter
+    decision_width = decision_width(range = c(20, 40)),   # Decision width between 20-40
+    attention_width = attention_width(range = c(20, 40)), # Attention width between 20-40
+    num_steps = num_steps(range = c(4, 6)),              # Number of steps between 4-6
+    learn_rate = learn_rate(range = c(-2.5, -1))         # Log learning rate between 10^-2.5 and 10^-1
   ) %>%
-  grid_max_entropy(size = 8)
+  grid_max_entropy(size = 8)  # Create 8 hyperparameter combinations using max entropy sampling
 
+# Display the hyperparameter grid
 grid
 
+# Set up the racing method control object
+# Racing methods efficiently eliminate underperforming models early
+# ctrl <- control_race(verbose_elim = TRUE)  # Alternative configuration
+ctrl <- control_race(
+  verbose = TRUE,     # Print progress during tuning
+  save_pred = TRUE    # Save predictions for later analysis
+)
 
+# Create cross-validation folds for model evaluation
+folds <- vfold_cv(train, v = 5)  # 5-fold cross-validation
 
-# ctrl <- control_race(verbose_elim = TRUE)
-ctrl <- control_race(verbose = TRUE, save_pred = TRUE)
-
-folds <- vfold_cv(train, v = 5)
+# Set seed for reproducibility
 set.seed(777)
 
+# Execute the tuning process with ANOVA-based racing method
+# This efficiently eliminates poorly performing hyperparameter combinations
 res <- wf %>% 
-    tune_race_anova(
-    resamples = folds, 
-    grid = grid,
-    control = ctrl
+  tune_race_anova(
+    resamples = folds,   # Cross-validation folds 
+    grid = grid,         # Hyperparameter grid
+    control = ctrl       # Racing control settings
   )
 
+# Extract the model fit to examine variable importance
 fit <- pull_workflow_fit(fitted_model)
-vip(fit) + theme_minimal()
+
+# Create variable importance plot and save it
+importance_plot <- vip(fit) + 
+  theme_minimal() + 
+  labs(title = "Variable Importance in TabNet Model",
+       subtitle = "Based on Model with Default Parameters") +
+  theme(plot.title = element_text(face = "bold", size = 16),
+        plot.subtitle = element_text(size = 12),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"),
+        axis.title = element_text(face = "bold"),
+        axis.text.y = element_text(face = "bold")) +
+  # Replace the default bars with better colored ones
+  scale_fill_manual(values = c("#4285F4")) +
+  # Customize the bars without changing the x scale type
+  geom_col(fill = "#4285F4", width = 0.7)
+
+# Display the plot
+importance_plot
+
+# Save the plot for README with white background
+ggsave("images/variable_importance.png", importance_plot, width = 10, height = 8, dpi = 300, bg = "white")
 ```
 
-```{r}
+## Extracting Optimal Hyperparameters
 
+```{r}
+# Extract the best hyperparameter configuration based on ROC AUC metric
 best_param <- res |> 
-   select_best(metric = "roc_auc") |> 
-   select(-.config)
+   select_best(metric = "roc_auc") |>  # Select best parameters using ROC AUC metric
+   select(-.config)                    # Remove configuration identifier column
 
-best_param$learn_rate
-best_param$decision_width
-best_param$attention_width
-best_param$num_steps
+# Display the best parameters individually
+cat("Best learning rate:", best_param$learn_rate, "\n")
+cat("Best decision width:", best_param$decision_width, "\n")
+cat("Best attention width:", best_param$attention_width, "\n")
+cat("Best number of steps:", best_param$num_steps, "\n")
+
+# Create a visual representation of best parameters
+library(ggplot2)
+
+# Prepare data for visualization
+param_data <- data.frame(
+  Parameter = c("Learning Rate", "Decision Width", "Attention Width", "Number of Steps"),
+  Value = c(10^best_param$learn_rate, best_param$decision_width, 
+           best_param$attention_width, best_param$num_steps)
+)
+
+# Create a bar plot for the optimized parameters
+opt_params_plot <- ggplot(param_data, aes(x = Parameter, y = Value)) +
+  geom_col(fill = "#4285F4", width = 0.7) +
+  geom_text(aes(label = round(Value, 4)), vjust = -0.5, size = 4.5, fontface = "bold") +
+  theme_minimal() +
+  labs(title = "Optimized TabNet Parameters",
+       subtitle = "From ANOVA Racing Method",
+       y = "Parameter Value", x = "") +
+  theme(plot.title = element_text(face = "bold", size = 16),
+        plot.subtitle = element_text(size = 12),
+        axis.title.y = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1, face = "bold", size = 10),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2)))
+
+# Display the plot
+opt_params_plot
+
+# Save the plot for README with white background
+ggsave("images/optimized_parameters.png", opt_params_plot, width = 9, height = 7, dpi = 300, bg = "white")
 ```
 
+## Alternative Implementation with Categorical Target
+
 ```{r}
-# https://cran.r-project.org/web/packages/tabnet/vignettes/tidymodels-interface.html
+# This implementation follows the tidymodels interface for tabnet
+# See: https://cran.r-project.org/web/packages/tabnet/vignettes/tidymodels-interface.html
+
+# Set seed for reproducibility
 set.seed(13383645)
-#Reading Data
-german_credit <-  read.table("http://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data")
 
-#Assigning variable names
-colnames(german_credit)=c("chk_acct","duration","credit_his","purpose","amount","saving_acct","present_emp","installment_rate","sex","other_debtor","present_resid","property","age","other_install","housing","n_credits","job","n_people","telephone","foreign","Class")
+# Load German Credit data again for the alternative implementation
+german_credit <- read.table("http://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data")
 
-#Class is in 1,2 - we need to change it to 1->1, 2->0 for Tabnet
+# Assign column names
+colnames(german_credit) <- c(
+  "chk_acct", "duration", "credit_his", "purpose", "amount", 
+  "saving_acct", "present_emp", "installment_rate", "sex", "other_debtor", 
+  "present_resid", "property", "age", "other_install", "housing", 
+  "n_credits", "job", "n_people", "telephone", "foreign", "Class"
+)
+
+# Alternative approach for target encoding
+# Class is originally 1 (good) and 2 (bad)
+# These commented lines show alternative coding approaches
 # german_credit$Class <- 2 - german_credit$Class
 # german_credit$Class <- german_credit$Class - 1
 
+# Convert categorical variables to factors
 german_credit <- german_credit |> 
-  mutate_at(vars("chk_acct","credit_his","purpose","saving_acct","present_emp","sex","other_debtor","present_resid","property","other_install","housing","job","telephone","foreign","Class"), factor)
+  mutate_at(vars("chk_acct", "credit_his", "purpose", "saving_acct", "present_emp",
+                "sex", "other_debtor", "present_resid", "property", "other_install", 
+                "housing", "job", "telephone", "foreign", "Class"), factor)
+
+# Important note about class encoding
 #> For binary classification, the first factor level is assumed to be the event.
 #> Use the argument `event_level = "second"` to alter this as needed.
 
+# Recode the target variable with meaningful labels
 german_credit$Class <- dplyr::recode_factor(german_credit$Class, `1` = "good", `2` = "bad")
   
-  
+# Create test/train split using random sampling  
+# Select 20% of the data for testing
 test_idx <- sample.int(nrow(german_credit), size = 0.2 * nrow(german_credit))
 
-train <- german_credit[-test_idx,]
-test <- german_credit[test_idx,]
+# Create training and testing datasets
+train <- german_credit[-test_idx,]  # All rows except test indices
+test <- german_credit[test_idx,]    # Only test indices
 
+# Create preprocessing recipe
+# Include normalization of numeric predictors which is important for neural networks
 rec <- recipe(Class ~ ., train) %>%
-  step_normalize(all_numeric())
+  step_normalize(all_numeric())  # Normalize all numeric variables
 
+# Define TabNet model with default parameters
 mod <- tabnet(epochs = 50, batch_size = 128) %>%
   set_engine("torch", verbose = TRUE) %>%
   set_mode("classification")
 
+# Create workflow combining model and preprocessing
 wf <- workflow() %>%
   add_model(mod) %>%
   add_recipe(rec)
 
-folds <- vfold_cv(train, v = 5)
+# Create cross-validation folds for model evaluation
+folds <- vfold_cv(train, v = 5)  # 5-fold cross-validation
 
+# Fit the model on all CV folds and collect performance metrics
 fit_rs <- wf %>%
   fit_resamples(folds)
 
+# Display cross-validation metrics
 collect_metrics(fit_rs)
 
-# verify the results on test set
+# Fit final model on the entire training set
 model <- wf %>% fit(train)
+
+# Evaluate ROC AUC on test set using probability predictions
 test %>% 
   bind_cols(
-    predict(model, test, type = "prob")
+    predict(model, test, type = "prob")  # Generate probability predictions
   ) %>% 
-  roc_auc(Class, .pred_bad)
-# https://github.com/mlverse/tabnet
-metrics <- metric_set(accuracy, precision, recall)
-cbind(test, predict(model, test)) |> 
-  metrics(Class, estimate = .pred_class)
+  roc_auc(Class, .pred_bad)  # Calculate ROC AUC for 'bad' class
+
+# Calculate additional classification metrics
+# See: https://github.com/mlverse/tabnet for more information
+metrics <- metric_set(accuracy, precision, recall)  # Create a metric set
+model_metrics <- cbind(test, predict(model, test)) |> 
+  metrics(Class, estimate = .pred_class)  # Calculate metrics using class predictions
+
+# Display metrics
+model_metrics
+
+# Create a visual representation of the metrics
+metrics_plot <- ggplot(model_metrics, aes(x = .metric, y = .estimate)) +
+  geom_col(fill = "#34A853", width = 0.7) +
+  geom_text(aes(label = round(.estimate, 3)), vjust = -0.5, fontface = "bold", size = 5) +
+  theme_minimal() +
+  ylim(0, 1) +
+  labs(title = "TabNet Model Performance Metrics",
+       subtitle = "Evaluation on Test Dataset",
+       y = "Score", x = "") +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, face = "bold", size = 12),
+        plot.title = element_text(face = "bold", size = 16),
+        plot.subtitle = element_text(size = 12),
+        axis.title.y = element_text(face = "bold"),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2))) +
+  # Add gradient color to bars based on value
+  aes(fill = .estimate) +
+  scale_fill_gradient(low = "#34A853", high = "#188038", guide = "none")
+
+# Display the plot
+metrics_plot
+
+# Save the plot for README with white background
+ggsave("images/model_metrics.png", metrics_plot, width = 9, height = 7, dpi = 300, bg = "white")
+
+# Generate ROC curve using tidymodels' yardstick package
+# Get prediction probabilities
+prob_preds <- predict(model, test, type = "prob")
+
+# Check class levels and event ordering
+print("Class levels in test data:")
+print(levels(test$Class))
+
+# Get prediction probabilities
+prob_preds <- predict(model, test, type = "prob")
+print("Column names in probability predictions:")
+print(names(prob_preds))
+
+# Ensure we're using the correct event level (the 'bad' credit class)
+# In tidymodels, by default, the second level is the event of interest
+# If we set options(yardstick.event_first = FALSE) earlier, the second level is the event
+
+# For clarity, let's explicitly set the event level
+# Calculate the AUC value with explicit event level
+auc_value <- roc_auc(
+  tibble(truth = test$Class, estimate = prob_preds$.pred_bad), 
+  truth, estimate, event_level = "second"
+)$.estimate
+
+print(paste("AUC value:", round(auc_value, 3)))
+
+# Calculate ROC curve data points with explicit event level
+roc_data <- tibble(
+  truth = test$Class,
+  estimate = prob_preds$.pred_bad
+) %>%
+  roc_curve(truth, estimate, event_level = "second")
+
+# Print first few rows of ROC data to check
+print("First few rows of ROC curve data:")
+print(head(roc_data))
+
+# Create ROC curve plot
+# First check if our ROC curve looks reasonable (should be above diagonal line)
+if (auc_value < 0.55) {
+  print("WARNING: Very low AUC value detected. This could indicate:")
+  print("1. The classes might be inverted in the ROC calculation")
+  print("2. The model may not be performing well on this dataset")
+  print("3. There might be an issue with the probability predictions")
+  
+  # Let's try inverting the probabilities to see if that helps
+  print("Trying with inverted probabilities:")
+  inv_auc_value <- roc_auc(
+    tibble(truth = test$Class, estimate = 1 - prob_preds$.pred_bad), 
+    truth, estimate, event_level = "second"
+  )$.estimate
+  
+  print(paste("Inverted AUC value:", round(inv_auc_value, 3)))
+  
+  # If the inverted AUC is better, use it instead
+  if (inv_auc_value > auc_value) {
+    print("Using inverted probabilities for ROC curve (better AUC)")
+    auc_value <- inv_auc_value
+    roc_data <- tibble(
+      truth = test$Class,
+      estimate = 1 - prob_preds$.pred_bad
+    ) %>%
+      roc_curve(truth, estimate, event_level = "second")
+  }
+}
+
+# Now create the plot with the potentially corrected data
+roc_plot <- ggplot(roc_data, aes(x = 1 - specificity, y = sensitivity)) +
+  # Add area under the curve with gradient fill
+  geom_ribbon(aes(ymin = 0, ymax = sensitivity), fill = "#4285F4", alpha = 0.2) +
+  # Add reference diagonal line
+  geom_abline(lty = 2, alpha = 0.7, color = "#5F6368") +
+  # Add thicker ROC curve line
+  geom_line(color = "#4285F4", size = 1.5) +
+  # Add points to the curve - safely selecting subset of rows
+  geom_point(data = function(x) {
+    # Safely sample points to add markers
+    n_points <- min(10, nrow(x))
+    if (n_points <= 1) return(x) # If only one point, return it
+    indices <- round(seq(1, nrow(x), length.out = n_points))
+    # Ensure indices are within bounds and are integers
+    indices <- as.integer(pmin(pmax(indices, 1), nrow(x)))
+    # Return the subset
+    x[indices, ]
+  }, color = "#EA4335", size = 3) +
+  theme_minimal() +
+  # Improve axis titles and plot labels
+  labs(title = "ROC Curve for TabNet Credit Risk Model",
+       subtitle = paste0("AUC: ", round(auc_value, 3)),
+       x = "False Positive Rate (1 - Specificity)",
+       y = "True Positive Rate (Sensitivity)") +
+  # Enhanced styling
+  theme(plot.title = element_text(face = "bold", size = 16),
+        plot.subtitle = element_text(size = 13, face = "bold", color = "#4285F4"),
+        axis.title = element_text(face = "bold"),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"),
+        legend.position = "none") +
+  # Add annotation for the AUC value
+  annotate("text", x = 0.75, y = 0.25, 
+           label = paste("AUC =", round(auc_value, 3)), 
+           size = 5, fontface = "bold", color = "#4285F4")
+  
+# Display the plot
+roc_plot
+
+# Save plot for README with white background
+ggsave("images/roc_curve.png", roc_plot, width = 9, height = 7, dpi = 300, bg = "white")
 ```

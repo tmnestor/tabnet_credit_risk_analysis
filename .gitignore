@@ -1,5 +1,15 @@
+# R specific files
 .Rproj.user
 .Rhistory
 .RData
 .Ruserdata
 saved_model.rds
+
+# Claude system files
+CLAUDE.md
+.claude/
+.claude*
+claude_artifacts/
+__pycache__/
+.python_history
+.bash_history
